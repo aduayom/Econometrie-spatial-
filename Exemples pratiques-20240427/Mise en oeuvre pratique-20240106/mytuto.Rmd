@@ -1,0 +1,271 @@
+---
+date: "08/01/2024"
+output: 
+    html_document:
+        theme: united
+        toc: true
+        toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Les packages à utiliser
+```{r}
+library(tidyverse)  # Modern data science workflow
+library(sf)
+library(sp)
+library(spdep)
+library(rgdal)
+library(rgeos)
+library(tmap)
+library(tmaptools)
+library(spgwr)
+library(grid)
+library(gridExtra)
+```
+
+## les fichiers utilisés
+
+- Inspirés de   [Guy Lansley & James Cheshire (2016)](https://data.cdrc.ac.uk/tutorial/an-introduction-to-spatial-data-analysis-and-visualisation-in-r).
+
+## Données non spatiales
+Les données sont accessibles dans le fichier practicaldata.csv. Prendre garde à la définition des répertoires. On nomme le dataframe Census.data.
+```{r}
+Census.Data <-read.csv("practicaldata.csv")
+```
+Pour une vue rapide des données
+```{r}
+glimpse(Census.Data)
+```
+## Données spatiales
+les données ont pour nom Camden_oa11 et on va utiliser `readOGR`qui n'est utilisable que si la géométrie des données est clairement définie, ce qui n'est souvent le cas que dans des applications pédagogiques. L'objet spatial qui en résulte ets appelé Output.Areas
+```{r}
+Output.Areas <- readOGR(".", "Camden_oa11")
+```
+
+```{r eval=FALSE}
+# Sortie très longue donc l'exécuter si nécessaire directement dans la console
+glimpse(Output.Areas)
+```
+## Utilisation du package **sf** 
+
+Pour lire le même fichier spatial nommé Output.Areas2
+
+```{r}
+Output.Areas2 <- read_sf("Camden_oa11.shp")
+```
+
+```{r}
+glimpse(Output.Areas2)
+```
+
+## Fusion des données spatiales et non spatiales
+
+```{r}
+OA.Census <- merge(Output.Areas, Census.Data, by.x="OA11CD", by.y="OA")
+```
+
+Transformation en un objet `sf`
+
+```{r}
+OA.Census_sf <- st_as_sf(OA.Census)
+```
+
+## Distribution Spatiale
+
+```{r}
+tm_shape(OA.Census_sf) + 
+  tm_fill("Qualification",
+          palette = "Reds", 
+          style = "quantile", 
+          title = "% with a Qualification") +
+  tm_borders(alpha=.4)  
+```
+
+## Structure de voisinage
+### Contiguïté queen
+A partir d'un objet `sp`
+```{r}
+neighbours <- poly2nb(OA.Census)
+neighbours
+```
+A partir d'un objet `sf`
+```{r}
+neighbours_sf <- poly2nb(OA.Census_sf)
+neighbours_sf
+```
+### Graphe de connectivité queen
+
+```{r}
+plot(OA.Census, border = 'lightgrey')
+plot(neighbours, coordinates(OA.Census), add=TRUE, col='red')
+```
+
+### Contiguïté rook
+
+```{r}
+neighbours2 <- poly2nb(OA.Census, queen = FALSE)
+neighbours2
+```
+
+### Connectivité rook 
+
+```{r}
+plot(OA.Census, border = 'lightgrey')
+plot(neighbours2, coordinates(OA.Census), add=TRUE, col='blue')
+```
+
+### Plot queen vs rook
+
+```{r}
+plot(OA.Census, border = 'lightgrey')
+plot(neighbours, coordinates(OA.Census), add=TRUE, col='red')
+plot(neighbours2, coordinates(OA.Census), add=TRUE, col='blue')
+```
+
+## Autocorrélation Spatiale Globale
+
+### Matrice de pondération spatiale
+
+```{r}
+listw <- nb2listw(neighbours2)
+listw
+```
+
+### Test de Moran Global 
+
+
+```{r}
+globalMoran <- moran.test(OA.Census$Qualification, listw)
+globalMoran
+```
+
+```{r}
+globalMoran[["estimate"]][["Moran I statistic"]]
+```
+
+```{r}
+globalMoran[["p.value"]]
+```
+
+The Moran I statistic is 0.54, we can, therefore, determine that there our qualification variable is positively autocorrelated in Camden. In other words, the data does spatially cluster. We can also consider the p-value as a measure of the statistical significance of the model.
+
+
+### Autocorrélation spatiale Locale
+#### Moran scatterplot 
+
+```{r}
+moran <- moran.plot(OA.Census$Qualification, listw = nb2listw(neighbours2, style = "W"))
+```
+
+#### Calcul de la statistique de Moran locale
+
+```{r}
+local <- localmoran(x = OA.Census$Qualification, listw = nb2listw(neighbours2, style = "W"))
+```
+
+- Ii:	local moran statistic
+
+- E.Ii: expectation of local moran statistic
+
+- Var.Ii:	variance of local moran statistic
+
+- Z.Ii:	standard deviate of local moran statistic
+
+- Pr():	p-value of local moran statistic
+
+#### Représentation graphique
+
+```{r}
+# binds results to our polygon shapefile
+moran.map <- cbind(OA.Census, local)
+```
+
+```{r}
+tm_shape(moran.map) +
+  tm_fill(col = "Ii",
+          style = "quantile",
+          title = "local moran statistic") 
+```
+
+#### Plot LISA clusters
+
+```{r}
+quadrant <- vector(mode="numeric",length=nrow(local))
+
+# centers the variable of interest around its mean
+m.qualification <- OA.Census$Qualification - mean(OA.Census$Qualification)     
+
+# centers the local Moran's around the mean
+m.local <- local[,1] - mean(local[,1])    
+
+# significance threshold
+signif <- 0.1 
+
+# builds a data quadrant
+quadrant[m.qualification >0 & m.local>0] <- 4  
+quadrant[m.qualification <0 & m.local<0] <- 1      
+quadrant[m.qualification <0 & m.local>0] <- 2
+quadrant[m.qualification >0 & m.local<0] <- 3
+quadrant[local[,5]>signif] <- 0   
+
+# plot in r
+brks <- c(0,1,2,3,4)
+colors <- c("white","blue",rgb(0,0,1,alpha=0.4),rgb(1,0,0,alpha=0.4),"red")
+plot(OA.Census,border="lightgray",col=colors[findInterval(quadrant,brks,all.inside=FALSE)])
+box()
+legend("bottomleft", legend = c("insignificant","low-low","low-high","high-low","high-high"),
+       fill=colors,bty="n")
+```
+
+### Approche de Getis-Ord 
+
+First, we need to define a new set of neighbours. Whilst the spatial autocorrection considered units which shared borders, for Getis-Ord we are defining neighbours based on proximity. The example below shows the results where we have a search radius of 250 metres.
+
+However, here a search radius of just 250 metres fails to define nearest neighbours for some areas so we will need to set the radius as 800 metres or more for our model in Camden.
+
+- creates centroid and joins neighbours within 0 and 800 units
+
+```{r}
+nb <- dnearneigh(coordinates(OA.Census), 0, 800)
+```
+
+
+- creates listw
+
+```{r}
+nb_lw <- nb2listw(nb, style = 'B')
+```
+
+## Plot data and neighbours
+
+```{r}
+plot(OA.Census, border = 'lightgrey')
+plot(nb, coordinates(OA.Census), add=TRUE, col = 'red')
+```
+
+## Getis-Ord Gi statistic
+
+NOTE: On some machines the `cbind` may not work with a spatial data file, in this case, you will need to change OA.Census to OA.Census@data so that R knows which part of the spatial data file to join. If you take this approach the subsequent column ordering may be different to what is shown in the example below.
+
+
+```{r}
+local_g <- localG(OA.Census$Qualification, nb_lw)
+local_g <- cbind(OA.Census, as.matrix(local_g))
+names(local_g)[6] <- "gstat"
+```
+
+## Cluster map
+
+```{r}
+tm_shape(local_g) + 
+  tm_fill("gstat", 
+          palette = "RdBu",
+          style = "pretty") +
+  tm_borders(alpha=.4)
+```
+
+The Gi Statistic is represented as a Z-score. Greater values represent a greater intensity of clustering and the direction (positive or negative) indicates high or low clusters. The final map should indicate the location of hot-spots across Camden. Repeat this for another variable.
+
+
